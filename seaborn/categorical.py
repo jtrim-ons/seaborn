@@ -3,6 +3,7 @@ from numbers import Number
 import warnings
 from colorsys import rgb_to_hls
 from functools import partial
+import math
 
 import numpy as np
 import pandas as pd
@@ -281,6 +282,7 @@ class _CategoricalPlotterNew(VectorPlotter):
     def plot_swarms(
         self,
         dodge,
+        compact,
         color,
         edgecolor,
         warn_thresh,
@@ -327,7 +329,7 @@ class _CategoricalPlotterNew(VectorPlotter):
                 point_collections[sub_data[self.cat_axis].iloc[0]] = points
 
         beeswarm = Beeswarm(
-            width=width, orient=self.orient, warn_thresh=warn_thresh,
+            width=width, orient=self.orient, warn_thresh=warn_thresh, compact=compact
         )
         for center, points in point_collections.items():
             if points.get_offsets().shape[0] > 1:
@@ -2838,6 +2840,9 @@ stripplot.__doc__ = dedent("""\
         the strips for different hue levels along the categorical axis.
         Otherwise, the points for each level will be plotted on top of
         each other.
+    compact : bool, optional
+        Setting this to ``True`` will use an alternative algorithm that often
+        results in a tighter packing of the points in the beeswarm.
     {orient}
     {color}
     {palette}
@@ -2878,7 +2883,7 @@ def swarmplot(
     x=None, y=None,
     hue=None, data=None,
     order=None, hue_order=None,
-    dodge=False, orient=None, color=None, palette=None,
+    dodge=False, compact=False, orient=None, color=None, palette=None,
     size=5, edgecolor="gray", linewidth=0, ax=None,
     hue_norm=None, fixed_scale=True, formatter=None, warn_thresh=.05,
     **kwargs
@@ -2924,6 +2929,7 @@ def swarmplot(
 
     p.plot_swarms(
         dodge=dodge,
+        compact=compact,
         color=color,
         edgecolor=edgecolor,
         warn_thresh=warn_thresh,
@@ -3577,6 +3583,7 @@ def catplot(
     legend=True, legend_out=True, sharex=True, sharey=True,
     margin_titles=False, facet_kws=None,
     hue_norm=None, fixed_scale=True, formatter=None,
+    compact=False,
     **kwargs
 ):
 
@@ -3693,6 +3700,7 @@ def catplot(
 
             p.plot_swarms(
                 dodge=dodge,
+                compact=compact,
                 color=color,
                 edgecolor=edgecolor,
                 warn_thresh=warn_thresh,
@@ -3989,13 +3997,14 @@ catplot.__doc__ = dedent("""\
 
 class Beeswarm:
     """Modifies a scatterplot artist to show a beeswarm plot."""
-    def __init__(self, orient="v", width=0.8, warn_thresh=.05):
+    def __init__(self, orient="v", width=0.8, warn_thresh=.05, compact=False):
 
         # XXX should we keep the orient parameterization or specify the swarm axis?
 
         self.orient = orient
         self.width = width
         self.warn_thresh = warn_thresh
+        self.compact = compact
 
     def __call__(self, points, center):
         """Swarm `points`, a PathCollection, around the `center` position."""
@@ -4035,7 +4044,13 @@ class Beeswarm:
 
         # Adjust points along the categorical axis to prevent overlaps
         new_xyr = np.empty_like(orig_xyr)
-        new_xyr[sorter] = self.beeswarm(orig_xyr)
+        if self.compact:
+            new_xyr[sorter] = self.compact_beeswarm(orig_xyr)
+        else:
+            new_xyr[sorter] = self.beeswarm(orig_xyr)
+
+        # XXX TODO remove print statement
+        print(max(xyr[0] for xyr in new_xyr) - min(xyr[0] for xyr in new_xyr))
 
         # Transform the point coordinates back to data coordinates
         if self.orient == "h":
@@ -4058,6 +4073,62 @@ class Beeswarm:
             points.set_offsets(np.c_[orig_x_data, new_y_data])
         else:
             points.set_offsets(np.c_[new_x_data, orig_y_data])
+
+    def compact_beeswarm(self, orig_xyr):
+        """Adjust x position of points to avoid overlaps."""
+        # In this method, `x` is always the categorical axis
+        class Circle:
+            __slots__ = ('x', 'y', 'r', 'placed', 'lo_x', 'hi_x', 'abs_x')
+            def __init__(self, xyr):
+                self.x = 0
+                self.y = xyr[1]
+                self.r = xyr[2]
+                self.placed = False
+                self.lo_x = self.x
+                self.hi_x = self.x
+                self.abs_x = abs(self.x)
+
+        def next(circles):
+            best = None
+            for c in circles:
+                if c.placed:
+                    continue
+                if best is None or c.abs_x < best.abs_x:
+                    best = c
+            return best
+
+        def update(circles, circle, d, midline):
+            for c in circles:
+                if c.placed:
+                    continue
+                y_diff = abs(circle.y - c.y)
+                if y_diff >= d:
+                    continue
+                x_diff = math.sqrt(d * d - y_diff * y_diff)
+                c.hi_x = max(c.hi_x, circle.x + x_diff)
+                c.lo_x = min(c.lo_x, circle.x - x_diff)
+                c.x = c.hi_x if c.hi_x <= -c.lo_x else c.lo_x
+                c.abs_x = abs(c.x)
+
+        # Center of the swarm, in point coordinates
+        midline = orig_xyr[0, 0]
+
+        r = orig_xyr[0, 2]
+        if not np.all(orig_xyr[:,2] == r):
+            error = "Swarmplot with `compact=True` requires equal radii."
+            raise ValueError(error)
+
+        # XXX TODO avoid magic number 1.05 (which is for padding)
+        d = r * 2 * 1.05
+
+        circles = [Circle(xyr) for xyr in orig_xyr]
+
+        for i in range(len(circles)):
+            c = next(circles)
+            c.placed = True
+            update(circles, c, d, midline)
+
+        return np.array([[c.x + midline, c.y, r] for c in circles])
 
     def beeswarm(self, orig_xyr):
         """Adjust x position of points to avoid overlaps."""
