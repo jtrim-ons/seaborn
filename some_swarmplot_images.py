@@ -8,8 +8,8 @@ sns.set_theme(style="whitegrid")
 tips = sns.load_dataset("tips")
 rand_funcs = [
     ("uniform", np.random.uniform),
-    ("normal", np.random.uniform),
-    ("lognormal", np.random.uniform)
+    ("normal", np.random.normal),
+    ("lognormal", np.random.lognormal)
 ]
 
 def one_swarm(randoms, rname, sz, compact):
